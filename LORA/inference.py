@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Simple inference helper for the fine-tuned LoRA model."""
+"""Simple inference helper for the fine-tuned LoRA model.
+
+Usage:
+python3 inference.py \
+  --prompt "Solve: integrate x^2 from 0 to 1." \
+  --max-new-tokens 200 \
+  --temperature 0.7 \
+  --adapter-path adapters/adapters.safetensors
+"""
 
 import argparse
 import logging

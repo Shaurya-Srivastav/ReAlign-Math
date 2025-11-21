@@ -19,12 +19,14 @@ import argparse
 import logging
 import time
 import json
+import pickle
+import os
 from pathlib import Path
 
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
-from mlx.utils import tree_flatten, tree_unflatten
+from mlx.utils import tree_flatten, tree_unflatten, tree_map
 
 from huggingface_hub import hf_hub_download, snapshot_download
 import torch
@@ -54,7 +56,9 @@ class TrainingConfig:
     lora_alpha: float = 16.0
     lora_layers: int = 16 # Number of layers to apply LoRA to
     max_seq_len: int = 2048
-    log_every_n_steps: int = 1
+    log_every_n_steps: int = 10
+    grad_accumulation_steps: int = 16
+    max_training_time_hours: float = 14.0
 
     # Prompt Template
     PROMPT_TEMPLATE: str = """You are a helpful math tutor. Solve the problem step by step and give the final answer at the end.
@@ -152,8 +156,21 @@ def convert_model_if_needed(config: TrainingConfig):
 # ==========================================
 def load_and_prepare_data(config: TrainingConfig, tokenizer, debug: bool = False):
     """Load dataset, format prompts, and tokenize within length limits."""
-    logging.info(f"Loading dataset '{config.dataset_name}'...")
-    dataset = load_dataset(config.dataset_name, split="train")
+    cache_file = Path("dataset_cache.pkl")
+    
+    # 1. Check Cache
+    if cache_file.exists() and not debug:
+        logging.info(f"Loading prepared dataset from cache: {cache_file}")
+        try:
+            with open(cache_file, "rb") as f:
+                tokenized_chunks = pickle.load(f)
+            logging.info(f"Loaded {len(tokenized_chunks)} chunks from cache.")
+            return tokenized_chunks
+        except Exception as e:
+            logging.warning(f"Failed to load cache: {e}. Re-processing dataset.")
+
+    logging.info(f"Loading dataset '{config.dataset_name}' (subset='all', split='train')...")
+    dataset = load_dataset(config.dataset_name, name="all", split="train")
 
     if debug:
         logging.warning("Debug mode active: using only 10 samples.")
@@ -192,7 +209,61 @@ def load_and_prepare_data(config: TrainingConfig, tokenizer, debug: bool = False
         truncated_examples,
         total_prompts,
     )
+    
+    # 2. Save Cache
+    if not debug:
+        logging.info(f"Saving processed dataset to cache: {cache_file}")
+        with open(cache_file, "wb") as f:
+            pickle.dump(tokenized_chunks, f)
+            
     return tokenized_chunks
+
+
+def collate_batch(batch, tokenizer):
+    """
+    Pads a batch of token arrays to the maximum length in the batch.
+    Returns:
+        inputs: (batch_size, max_len)
+        targets: (batch_size, max_len)
+        lengths: (batch_size,) - for masking
+    """
+    # Calculate max length in this batch
+    max_len = max(len(item) - 1 for item in batch)
+    
+    # Pad token is typically 0 or tokenizer.pad_token_id
+    pad_token = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+    
+    inputs_list = []
+    targets_list = []
+    lengths_list = []
+    
+    for item in batch:
+        # item is [t1, t2, ..., tn]
+        # input: [t1, ..., tn-1]
+        # target: [t2, ..., tn]
+        
+        inp = item[:-1]
+        tgt = item[1:]
+        length = len(inp)
+        lengths_list.append(length)
+        
+        # Create padded arrays
+        pad_len = max_len - length
+        
+        if pad_len > 0:
+            # Pad inputs with pad_token
+            inp_padded = mx.concatenate([inp, mx.full((pad_len,), pad_len, dtype=mx.int32)]) # Using pad_len as filler, actual value doesn't matter if masked
+            # Pad targets with a special ignore index (e.g., -100), though we will use explicit masking
+            tgt_padded = mx.concatenate([tgt, mx.full((pad_len,), pad_token, dtype=mx.int32)])
+        else:
+            inp_padded = inp
+            tgt_padded = tgt
+            
+        inputs_list.append(inp_padded)
+        targets_list.append(tgt_padded)
+        
+    return mx.stack(inputs_list), mx.stack(targets_list), mx.array(lengths_list)
+
 
 # ==========================================
 # TRAINING
@@ -203,22 +274,27 @@ class LoRATraining:
         self.tokenizer = tokenizer
         self.config = config
 
-    def loss(self, model, inputs, targets):
+    def loss(self, model, inputs, targets, lengths):
         outputs = model(inputs)
         logits = outputs[0] if isinstance(outputs, (tuple, list)) else outputs
         logits = logits.astype(mx.float32)
 
-        # Flatten logits/targets so cross_entropy sees (N, vocab) vs (N,)
-        if logits.ndim == 3:
-            bsz, seq_len, vocab = logits.shape
-            logits = logits.reshape(bsz * seq_len, vocab)
-            targets = targets.reshape(bsz * seq_len)
-        elif logits.ndim == 2 and targets.ndim > 1:
-            # logits already (seq, vocab); ensure targets flattened
-            targets = targets.reshape(-1)
+        # Create mask based on lengths
+        # inputs shape: (B, L)
+        B, L = inputs.shape
+        indices = mx.arange(L)[None, :] # (1, L)
+        mask = indices < lengths[:, None] # (B, L)
+        
+        # Flatten for cross entropy
+        logits = logits.reshape(-1, logits.shape[-1])
+        targets = targets.reshape(-1)
+        mask = mask.reshape(-1)
 
         ce = nn.losses.cross_entropy(logits, targets)
-        return mx.mean(ce)
+        
+        # Apply mask and average over valid tokens only
+        ce = ce * mask
+        return ce.sum() / mask.sum()
 
     def _apply_lora(self):
         """Manually apply LoRA to the model layers."""
@@ -262,59 +338,121 @@ class LoRATraining:
         p = sum(v.size for _, v in tree_flatten(self.model.trainable_parameters()))
         logging.info(f"Starting LoRA training with {p / 1e6:.3f}M trainable parameters.")
 
-        # Optimizer
-        optimizer = optim.Adam(learning_rate=self.config.learning_rate)
+        # Optimizer: AdamW is generally better for LLMs
+        optimizer = optim.AdamW(learning_rate=self.config.learning_rate)
+        
+        # Value and grad function now expects (model, inputs, targets, lengths)
         loss_and_grad_fn = nn.value_and_grad(self.model, self.loss)
 
-        for epoch in range(self.config.num_epochs):
-            epoch_loss = 0.0
-            num_batches = (len(dataset) + self.config.batch_size - 1) // self.config.batch_size
+        training_start_time = time.time()
+        time_limit_seconds = self.config.max_training_time_hours * 3600
+        stop_training = False
 
+        for epoch in range(self.config.num_epochs):
+            if stop_training:
+                break
+                
+            epoch_loss = 0.0
+            
+            # Shuffle dataset at start of epoch
+            import random
+            random.shuffle(dataset)
+            
+            num_batches = (len(dataset) + self.config.batch_size - 1) // self.config.batch_size
+            
             logging.info("""
 ====================
 Epoch %d / %d
 --------------------
-batches: %d | batch_size: %d | lr: %.2e
+batches: %d | batch_size: %d | accum: %d | eff_batch: %d | lr: %.2e
 ====================""".strip(),
                 epoch + 1,
                 self.config.num_epochs,
                 num_batches,
                 self.config.batch_size,
+                self.config.grad_accumulation_steps,
+                self.config.batch_size * self.config.grad_accumulation_steps,
                 self.config.learning_rate,
             )
 
+            # Accumulate gradients state
+            accumulated_grads = None
+            accumulated_loss = 0.0
+            steps_since_update = 0
+            
+            step_start = time.time()
+
             with tqdm(range(num_batches), desc=f"Epoch {epoch+1}/{self.config.num_epochs}") as pbar:
                 for i, batch_start in enumerate(range(0, len(dataset), self.config.batch_size)):
-                    batch = dataset[batch_start:batch_start + self.config.batch_size]
-                    step_start = time.time()
+                    # 1. Prepare Batch
+                    raw_batch = dataset[batch_start:batch_start + self.config.batch_size]
+                    inputs, targets, lengths = collate_batch(raw_batch, self.tokenizer)
                     
-                    # Prepare inputs and targets
-                    inputs = mx.stack([b[:-1] for b in batch])
-                    targets = mx.stack([b[1:] for b in batch])
-                    tokens_this_step = sum(int(arr.size) for arr in batch)
+                    # 2. Compute Loss and Gradients
+                    (loss_val, grads) = loss_and_grad_fn(self.model, inputs, targets, lengths)
+                    
+                    # CRITICAL MEMORY FIX: Force evaluation of gradients immediately
+                    # This runs the backward pass now and frees activations
+                    mx.eval(grads, loss_val)
+                    
+                    # 3. Accumulate Gradients
+                    # Scale gradients by accumulation steps
+                    grads = tree_map(lambda x: x / self.config.grad_accumulation_steps, grads)
+                    
+                    if accumulated_grads is None:
+                        accumulated_grads = grads
+                    else:
+                        # Add current grads to accumulated grads
+                        accumulated_grads = tree_map(lambda x, y: x + y, accumulated_grads, grads)
+                        # Force evaluation of the accumulator to prevent graph growth
+                        mx.eval(accumulated_grads)
+                    
+                    accumulated_loss += loss_val.item()
+                    steps_since_update += 1
+                    
+                    # 4. Update Weights (if accumulation complete)
+                    if steps_since_update >= self.config.grad_accumulation_steps or (i == num_batches - 1):
+                        optimizer.update(self.model, accumulated_grads)
+                        mx.eval(self.model.parameters(), optimizer.state)
+                        
+                        # Reset accumulation
+                        accumulated_grads = None
+                        steps_since_update = 0
+                        
+                        # Logging
+                        tokens_this_step = int(lengths.sum().item())
+                        avg_loss = accumulated_loss / self.config.grad_accumulation_steps
+                        accumulated_loss = 0.0
+                        
+                        epoch_loss += avg_loss
+                        
+                        # Time tracking for progress bar
+                        elapsed_h = (time.time() - training_start_time) / 3600
+                        remain_h = max(0, self.config.max_training_time_hours - elapsed_h)
+                        
+                        pbar.set_postfix(loss=f"{avg_loss:.3f}", elapsed=f"{elapsed_h:.2f}h", remain=f"{remain_h:.2f}h")
+                        
+                        if ((i + 1) % self.config.log_every_n_steps) == 0:
+                            logging.info(
+                                "Step %d/%d | loss=%.4f | tokens=%d | time=%.2fs",
+                                i + 1,
+                                num_batches,
+                                avg_loss,
+                                tokens_this_step,
+                                time.time() - step_start,
+                            )
+                            step_start = time.time()
+                        
+                        # Check time limit
+                        elapsed_time = time.time() - training_start_time
+                        if elapsed_time > time_limit_seconds:
+                            logging.info(f"Time limit of {self.config.max_training_time_hours} hours reached. Stopping training.")
+                            stop_training = True
+                            break
 
-                    # Compute loss and gradients
-                    (loss_val, grads) = loss_and_grad_fn(self.model, inputs, targets)
-                    optimizer.update(self.model, grads)
-                    mx.eval(self.model.parameters(), optimizer.state)
-                    
-                    epoch_loss += loss_val.item()
-                    pbar.set_postfix(loss=f"{epoch_loss / (i+1):.3f}")
                     pbar.update(1)
 
-                    if ((i + 1) % self.config.log_every_n_steps) == 0:
-                        logging.info(
-                            "Epoch %d Step %d/%d | loss=%.4f | tokens=%d | step_time=%.2fs | running_loss=%.4f",
-                            epoch + 1,
-                            i + 1,
-                            num_batches,
-                            loss_val.item(),
-                            tokens_this_step,
-                            time.time() - step_start,
-                            epoch_loss / (i + 1),
-                        )
-
-            logging.info(f"Epoch {epoch+1} average loss: {epoch_loss / num_batches:.3f}")
+            logging.info(f"Epoch {epoch+1} average loss: {epoch_loss / (num_batches / self.config.grad_accumulation_steps):.3f}")
 
         self.save_adapters()
 
