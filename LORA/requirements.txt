@@ -1,0 +1,12 @@
+# Core MLX and data handling
+mlx
+mlx-lm
+numpy
+
+# Hugging Face ecosystem for downloading models/datasets
+huggingface-hub
+datasets
+sentencepiece # Often a dependency for tokenizers
+
+# Utilities
+tqdm
