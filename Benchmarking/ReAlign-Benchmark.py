@@ -13,7 +13,9 @@ import seaborn as sns
 from scipy import stats
 
 # Import from our refactored module
-from local_llm_evaluator import get_llm_reasoning, parse_reasoning_to_steps, StepAligner, EMBEDDING_MODEL
+# Import from our refactored module
+from local_llm_evaluator import get_llm_reasoning, parse_reasoning_to_steps, StepAligner, EMBEDDING_MODEL, initialize_mlx_model
+
 
 # --- Configuration ---
 DEFAULT_MODEL_NAME = "deepseek-ai/deepseek-math-7b-instruct"
@@ -296,7 +298,15 @@ def main():
     parser.add_argument("--limit", type=int, default=-1, help="Limit examples per subset")
     parser.add_argument("--mock", action="store_true", help="Run in mock mode")
     parser.add_argument("--subsets", nargs='+', help="Specific subsets to run (default: all)")
+    parser.add_argument("--adapter_path", type=str, help="Path to LoRA adapters (enables MLX mode)")
+    parser.add_argument("--base_model_path", type=str, default="../LORA/mlx_model", help="Path to base MLX model")
     args = parser.parse_args()
+
+    # Initialize MLX if adapter is provided
+    if args.adapter_path:
+        print(f"--- Initializing Local MLX Model ---")
+        initialize_mlx_model(args.base_model_path, args.adapter_path)
+
 
     print(f"--- Starting ReAlign Benchmark ---")
     print(f"Model: {args.model}")

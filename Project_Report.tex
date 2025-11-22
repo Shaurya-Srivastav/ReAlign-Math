@@ -82,18 +82,29 @@ D[i][j-1] + \gamma & \text{(Insertion)}
 \end{equation}
 where $\gamma = -0.1$ is a gap penalty to discourage skipping steps. The final \textbf{Alignment Score} $\mathcal{A}$ is the average similarity of the matched steps along the optimal path.
 
-\subsection{Efficient Fine-Tuning with QLoRA on MLX}
-To democratize access to reasoning model research, we implemented a fine-tuning pipeline for the \texttt{deepseek-math-7b-instruct} model using the Apple MLX framework.
+\subsection{Efficient Fine-Tuning on Apple Silicon}
+To democratize access to reasoning model research, we implemented two fine-tuning pipelines for the \texttt{deepseek-math-7b-instruct} model using the Apple MLX framework. This framework leverages the Unified Memory Architecture of Apple Silicon, allowing the CPU and GPU to access the same memory pool without copying, which is critical for training large models on consumer devices.
 
-\subsubsection{Unified Memory Architecture}
-Traditional deep learning frameworks require moving data between CPU and GPU memory, creating bottlenecks. MLX leverages the Unified Memory Architecture of Apple Silicon, allowing the CPU and GPU to access the same memory pool without copying. This is critical for training large models on consumer devices.
+\subsubsection{Standard LoRA Implementation}
+Our primary approach utilizes Low-Rank Adaptation (LoRA) \cite{hu2021lora} to adapt the pre-trained model to the \texttt{OpenR1-Math-220k} dataset. We freeze the pre-trained weights $W_0 \in \mathbb{R}^{d \times k}$ and constrain the update $\Delta W$ by representing it with a low-rank decomposition $W_0 + \Delta W = W_0 + BA$, where $B \in \mathbb{R}^{d \times r}$, $A \in \mathbb{R}^{r \times k}$, and the rank $r \ll \min(d, k)$.
 
-\subsubsection{4-Bit Quantization}
-We employed \textbf{QLoRA} \cite{dettmers2023qlora}, which freezes the base model parameters $W$ and injects trainable low-rank adapters $\Delta W = BA$. To minimize memory footprint, the base weights $W$ are quantized to 4-bit NormalFloat (NF4) precision.
+We applied LoRA adapters specifically to the Query ($W_q$) and Value ($W_v$) projection matrices of the self-attention layers. The training configuration was as follows:
+\begin{itemize}
+    \item \textbf{Rank ($r$)}: 8
+    \item \textbf{Scaling Factor ($\alpha$)}: 16.0 (resulting in a scaling of $\frac{\alpha}{r} = 2.0$)
+    \item \textbf{Dropout}: 0.05
+    \item \textbf{Optimizer}: AdamW with a learning rate of $1e-5$
+    \item \textbf{Sequence Length}: 1024 tokens
+\end{itemize}
+
+To manage memory on consumer hardware while maintaining training stability, we implemented \textbf{Gradient Accumulation}. With a physical batch size of 1 and 8 accumulation steps, we achieved an effective batch size of 8. We also utilized explicit memory management (via \texttt{mx.eval}) within the training loop to force graph evaluation and prevent memory ballooning during backpropagation.
+
+\subsubsection{4-Bit Quantization (QLoRA)}
+For devices with extremely limited memory (e.g., 8GB-16GB RAM), we extended our pipeline to support \textbf{QLoRA} \cite{dettmers2023qlora}. This approach quantizes the frozen base model parameters to 4-bit NormalFloat (NF4) precision while keeping the LoRA adapters in higher precision (FP16/FP32).
 \begin{equation}
     Y = (W_{4bit} + s \cdot BA)X
 \end{equation}
-This reduces the memory requirement of a 7B model from $\approx 14$GB (FP16) to $\approx 4.5$GB (INT4), enabling training on 16GB RAM devices.
+This optimization reduces the memory requirement of the 7B model from $\approx 14$GB (FP16) to $\approx 4.5$GB (INT4), enabling high-performance fine-tuning on entry-level MacBooks.
 
 \section{Results}
 

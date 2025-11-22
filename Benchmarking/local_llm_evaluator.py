@@ -8,6 +8,20 @@ from datasets import load_dataset
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 import re
+from pathlib import Path
+
+# --- MLX Support ---
+try:
+    import mlx.core as mx
+    from mlx_lm import load, generate
+    from mlx_lm.tuner.lora import LoRALinear
+    MLX_AVAILABLE = True
+except ImportError:
+    MLX_AVAILABLE = False
+
+MLX_MODEL = None
+MLX_TOKENIZER = None
+
 
 # --- Configuration ---
 DEFAULT_LLM_API_ENDPOINT = "http://127.0.0.1:1234/v1/completions"
@@ -17,7 +31,92 @@ DATASET_NAME = 'hkust-nlp/dart-math-hard'
 RESULTS_FILE = 'evaluation_results.json'
 
 # --- Processing Controls ---
+# --- Processing Controls ---
 MAX_EXAMPLES = 5
+
+# --- MLX Helper Functions ---
+def apply_lora_layers(model, adapter_path: str):
+    """
+    Applies LoRA layers to the model based on the adapter configuration.
+    """
+    adapter_path = Path(adapter_path)
+    config_path = adapter_path.parent / "adapter_config.json"
+    
+    if not config_path.exists():
+        print(f"WARNING: Adapter config not found at {config_path}. Using default rank=8, alpha=16.")
+        lora_rank = 8
+        lora_alpha = 16.0
+    else:
+        with open(config_path, "r") as f:
+            adapter_config = json.load(f)
+        lora_rank = adapter_config.get("lora_rank", 8)
+        lora_alpha = adapter_config.get("lora_alpha", 16.0)
+
+    lora_scale = lora_alpha / lora_rank
+    print(f"Applying LoRA adapters (rank={lora_rank}, alpha={lora_alpha})...")
+
+    for layer in model.model.layers:
+        for name in ("q_proj", "v_proj"):
+            if hasattr(layer.self_attn, name):
+                original_linear = getattr(layer.self_attn, name)
+                # Check dimensions
+                if hasattr(original_linear, "weight"):
+                    out_dim, in_dim = original_linear.weight.shape
+                else: # QuantizedLinear
+                    in_dim = original_linear.input_dims
+                    out_dim = original_linear.output_dims
+                    
+                lora_layer = LoRALinear(
+                    input_dims=in_dim,
+                    output_dims=out_dim,
+                    r=lora_rank,
+                    scale=lora_scale,
+                    dropout=0.0,
+                )
+                lora_layer.linear = original_linear
+                setattr(layer.self_attn, name, lora_layer)
+
+def initialize_mlx_model(model_path: str, adapter_path: str = None):
+    """
+    Initializes the global MLX model and tokenizer.
+    """
+    global MLX_MODEL, MLX_TOKENIZER
+    
+    if not MLX_AVAILABLE:
+        print("ERROR: MLX not installed. Cannot load local model.")
+        return
+
+    print(f"Loading MLX model from {model_path}...")
+    model, tokenizer = load(model_path)
+    
+    if adapter_path:
+        print(f"Loading adapters from {adapter_path}...")
+        apply_lora_layers(model, adapter_path)
+        model.load_weights(str(adapter_path))
+    
+    MLX_MODEL = model
+    MLX_TOKENIZER = tokenizer
+    print("MLX Model initialized successfully.")
+
+def get_mlx_reasoning(question: str, max_tokens: int = 1024, temperature: float = 0.6) -> str:
+    """
+    Generates reasoning using the loaded MLX model.
+    """
+    if MLX_MODEL is None:
+        return "Error: MLX Model not initialized."
+        
+    prompt = f"You are a helpful math tutor. Solve the problem step by step and give the final answer at the end.\n\n### Problem:\n{question}\n\n### Solution:\n"
+    
+    response = generate(
+        MLX_MODEL, 
+        MLX_TOKENIZER, 
+        prompt=prompt, 
+        max_tokens=max_tokens, 
+        verbose=False,
+        temp=temperature
+    )
+    return response
+
 
 # --- 1. Language Model (LLM) Interfacing ---
 def get_llm_reasoning(question: str, mock: bool = False, 
@@ -31,6 +130,13 @@ def get_llm_reasoning(question: str, mock: bool = False,
     if mock:
         # Return a dummy response for testing
         return f"Step 1: To solve {question}, we first analyze the problem.\nStep 2: Then we apply the formula.\nStep 3: Finally, we get the answer."
+
+    # Check if MLX model is loaded
+    if MLX_MODEL is not None:
+        return get_mlx_reasoning(question, max_tokens=max_tokens, temperature=temperature)
+
+    # A more structured prompt template
+
 
     # A more structured prompt template
     prompt = f"""Below is a math problem. Provide a step-by-step solution.
