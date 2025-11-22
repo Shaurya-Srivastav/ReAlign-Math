@@ -55,10 +55,10 @@ class TrainingConfig:
     lora_rank: int = 8
     lora_alpha: float = 16.0
     lora_layers: int = 16 # Number of layers to apply LoRA to
-    max_seq_len: int = 2048
-    log_every_n_steps: int = 10
-    grad_accumulation_steps: int = 16
-    max_training_time_hours: float = 14.0
+    max_seq_len: int = 1024
+    log_every_n_steps: int = 1
+    grad_accumulation_steps: int = 8
+    max_training_time_hours: float = 16.0
 
     # Prompt Template
     PROMPT_TEMPLATE: str = """You are a helpful math tutor. Solve the problem step by step and give the final answer at the end.
@@ -346,8 +346,12 @@ class LoRATraining:
 
         training_start_time = time.time()
         time_limit_seconds = self.config.max_training_time_hours * 3600
+        deadline = training_start_time + time_limit_seconds
+        logging.info(f"Training started at {time.ctime(training_start_time)}")
+        logging.info(f"Training deadline set for {time.ctime(deadline)} ({self.config.max_training_time_hours} hours)")
+        
         stop_training = False
-
+        
         for epoch in range(self.config.num_epochs):
             if stop_training:
                 break
@@ -382,7 +386,7 @@ batches: %d | batch_size: %d | accum: %d | eff_batch: %d | lr: %.2e
             
             step_start = time.time()
 
-            with tqdm(range(num_batches), desc=f"Epoch {epoch+1}/{self.config.num_epochs}") as pbar:
+            with tqdm(range(num_batches), desc=f"Epoch {epoch+1}/{self.config.num_epochs} [Deadline: {time.strftime('%H:%M', time.localtime(deadline))}]") as pbar:
                 for i, batch_start in enumerate(range(0, len(dataset), self.config.batch_size)):
                     # 1. Prepare Batch
                     raw_batch = dataset[batch_start:batch_start + self.config.batch_size]
@@ -434,12 +438,13 @@ batches: %d | batch_size: %d | accum: %d | eff_batch: %d | lr: %.2e
                         
                         if ((i + 1) % self.config.log_every_n_steps) == 0:
                             logging.info(
-                                "Step %d/%d | loss=%.4f | tokens=%d | time=%.2fs",
+                                "Step %d/%d | loss=%.4f | tokens=%d | time=%.2fs | remain=%.2fh",
                                 i + 1,
                                 num_batches,
                                 avg_loss,
                                 tokens_this_step,
                                 time.time() - step_start,
+                                remain_h
                             )
                             step_start = time.time()
                         
