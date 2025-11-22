@@ -1,0 +1,80 @@
+# Test Math Problems for Your Trained Model
+# Copy any of these to test your model!
+
+## Basic Algebra
+
+Solve for x: 2x + 5 = 13
+
+If 3(x - 4) = 15, what is x?
+
+Simplify: (2x + 3)(x - 5)
+
+Find the value of x if x^2 - 5x + 6 = 0
+
+## Calculus
+
+What is the derivative of f(x) = x^3 + 2x^2 - 5x + 1?
+
+Find the integral of sin(x) from 0 to π
+
+What is the limit as x approaches 2 of (x^2 - 4)/(x - 2)?
+
+Calculate the derivative of f(x) = e^(2x) * cos(x)
+
+## Geometry
+
+A right triangle has legs of length 3 and 4. What is the length of the hypotenuse?
+
+Find the area of a circle with radius 5.
+
+What is the volume of a sphere with radius r?
+
+A rectangle has length 12 and width 5. What is its perimeter?
+
+## Word Problems
+
+John has $50. He buys 3 books for $12 each. How much money does he have left?
+
+A car travels 60 miles in 1.5 hours. What is its average speed in miles per hour?
+
+If 5 workers can complete a job in 8 days, how many days will it take 10 workers to complete the same job?
+
+A store offers a 20% discount on an item that originally costs $80. What is the sale price?
+
+## Number Theory
+
+What is the greatest common divisor (GCD) of 48 and 18?
+
+Is 97 a prime number?
+
+Find the least common multiple (LCM) of 12 and 15
+
+What are the prime factors of 60?
+
+## Systems of Equations
+
+Solve the system: x + y = 10 and x - y = 4
+
+Find x and y if 2x + 3y = 12 and x - y = 1
+
+## Probability
+
+What is the probability of rolling a sum of 7 with two fair dice?
+
+A bag contains 5 red balls and 3 blue balls. What is the probability of drawing a red ball?
+
+## Trigonometry
+
+If sin(θ) = 3/5 and θ is in the first quadrant, what is cos(θ)?
+
+Convert 45 degrees to radians
+
+Simplify: sin^2(x) + cos^2(x)
+
+## Advanced
+
+Prove that the sum of the first n natural numbers is n(n+1)/2
+
+Find the Taylor series expansion of e^x around x = 0
+
+What is the eigenvalue of the matrix [[2, 1], [1, 2]]?
