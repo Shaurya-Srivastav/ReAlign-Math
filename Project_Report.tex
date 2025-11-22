@@ -1,0 +1,168 @@
+\documentclass[12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{float}
+\usepackage{cite}
+\usepackage{setspace}
+\usepackage{xcolor} % For placeholders
+
+% Page layout: 8-10 pages, single space, 12pt font
+\geometry{letterpaper, margin=1in}
+\singlespacing
+
+% Custom command for placeholders
+\newcommand{\placeholder}[1]{\textcolor{red}{\textbf{[#1]}}}
+
+\title{\textbf{ReAlign: Process-Aware Benchmarking for Mathematical Reasoning in Large Language Models}}
+\author{
+    Shaurya Srivastav \\
+    Department of Computer Science \\
+    University of California, Davis \\
+    \texttt{shaurya@ucdavis.edu}
+}
+\date{October 13, 2025}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Large Language Models (LLMs) have demonstrated remarkable capabilities in mathematical reasoning, yet current benchmarks primarily evaluate performance based on binary correctness of the final answer. This approach fails to distinguish between robust reasoning, lucky guesses, and hallucinations where the correct process leads to an incorrect result due to minor calculation errors. In this work, we introduce \textbf{ReAlign}, a novel benchmarking framework that evaluates the step-by-step reasoning quality of LLMs using semantic alignment algorithms adapted from bioinformatics. We further propose and implement a memory-efficient training pipeline using Quantized Low-Rank Adaptation (QLoRA) on Apple Silicon to democratize the fine-tuning of reasoning models. Our results demonstrate that ReAlign's alignment score correlates strongly with correctness (Pearson $r=\placeholder{0.XX}$) and reveals that up to \placeholder{XX}\% of "incorrect" answers in standard benchmarks contain substantially correct reasoning. We provide a comprehensive open-source toolkit for process-aware evaluation and efficient fine-tuning.
+\end{abstract}
+
+\section{Introduction}
+The domain of mathematical reasoning represents a significant frontier for Large Language Models (LLMs). While general-purpose models like GPT-4 and Claude 3 have achieved high accuracy on benchmarks such as GSM8K and MATH, the evaluation of these models remains superficial. The prevailing paradigm relies almost exclusively on checking the final answer---a binary metric that ignores the underlying reasoning process. This limitation is critical: a model might arrive at the correct answer through erroneous logic ("lucky guess") or fail to output the correct answer despite a flawless reasoning chain due to a trivial arithmetic mistake.
+
+Current approaches to reasoning evaluation typically involve human annotation, which is unscalable, or model-based grading that often lacks granularity. There is a missing link in the automated evaluation ecosystem: a metric that can quantitatively assess the \textit{structure} and \textit{semantic validity} of the reasoning trace itself, independent of the final output. Furthermore, the computational cost of fine-tuning models to improve this reasoning capability remains prohibitive for many researchers, often requiring clusters of enterprise-grade GPUs.
+
+In this paper, we contribute two primary advances to address these challenges:
+\begin{enumerate}
+    \item \textbf{The ReAlign Framework}: A novel metric that leverages dynamic programming and semantic embeddings to align model-generated reasoning steps with ground-truth solutions, providing a granular "Alignment Score."
+    \item \textbf{Efficient QLoRA Training on MLX}: A training pipeline optimized for Apple Silicon that enables the fine-tuning of 7B-parameter models on consumer hardware with limited memory (16GB RAM) using 4-bit quantization.
+\end{enumerate}
+
+We demonstrate that our alignment metric provides a robust taxonomy of model failure modes---distinguishing between conceptual misunderstandings and calculation errors---and that our QLoRA implementation effectively adapts models to domain-specific reasoning tasks with minimal resource overhead.
+
+\section{Related Work}
+\subsection{Mathematical Reasoning Benchmarks}
+Standard benchmarks like GSM8K and MATH \cite{hendrycks2021measuring} evaluate models based on exact string matching of the final answer. While recent efforts like GSM-Hard attempt to increase difficulty, they retain the binary evaluation paradigm. ReAlign departs from this by evaluating the \textit{process}, similar to how human educators grade partial credit.
+
+\subsection{Process Supervision}
+Our work is inspired by Process Reward Models (PRMs) \cite{cobbe2021training}, which train verifiers to score individual reasoning steps. However, PRMs require expensive human-annotated step labels. ReAlign achieves a similar granular evaluation \textit{unsupervised}, by aligning student steps to a reference solution using semantic similarity.
+
+\section{Methods}
+
+\subsection{The ReAlign Benchmarking Framework}
+The core of our methodology is the \texttt{StepAligner}, an algorithm designed to measure the semantic correspondence between a student model's reasoning chain and a reference solution.
+
+\subsubsection{Step Extraction and Embedding}
+Given a raw solution string $S$, we employ a heuristic parser $\mathcal{P}$ to segment the text into a sequence of discrete reasoning steps $S = \{s_1, s_2, ..., s_n\}$. We filter out conversational artifacts and normalize step markers. Each step $s_i$ is then projected into a high-dimensional semantic vector space using the \texttt{BAAI/bge-large-en-v1.5} embedding model $E$:
+\begin{equation}
+    \mathbf{v}_i = E(s_i) \in \mathbb{R}^{1024}
+\end{equation}
+
+\subsubsection{Dynamic Programming Alignment}
+To align the student steps $S$ with the benchmark steps $B = \{b_1, ..., b_m\}$, we utilize the Needleman-Wunsch algorithm \cite{needleman1970general}. We first compute a similarity matrix $M \in \mathbb{R}^{n \times m}$ where each entry represents the cosine similarity:
+\begin{equation}
+    M_{i,j} = \frac{\mathbf{v}_{s_i} \cdot \mathbf{v}_{b_j}}{\|\mathbf{v}_{s_i}\| \|\mathbf{v}_{b_j}\|}
+\end{equation}
+
+We define the optimal alignment score matrix $D$ recursively:
+\begin{equation}
+D[i][j] = \max \begin{cases} 
+D[i-1][j-1] + M_{i,j} & \text{(Match)} \\
+D[i-1][j] + \gamma & \text{(Deletion)} \\
+D[i][j-1] + \gamma & \text{(Insertion)}
+\end{cases}
+\end{equation}
+where $\gamma = -0.1$ is a gap penalty to discourage skipping steps. The final \textbf{Alignment Score} $\mathcal{A}$ is the average similarity of the matched steps along the optimal path.
+
+\subsection{Efficient Fine-Tuning with QLoRA on MLX}
+To democratize access to reasoning model research, we implemented a fine-tuning pipeline for the \texttt{deepseek-math-7b-instruct} model using the Apple MLX framework.
+
+\subsubsection{Unified Memory Architecture}
+Traditional deep learning frameworks require moving data between CPU and GPU memory, creating bottlenecks. MLX leverages the Unified Memory Architecture of Apple Silicon, allowing the CPU and GPU to access the same memory pool without copying. This is critical for training large models on consumer devices.
+
+\subsubsection{4-Bit Quantization}
+We employed \textbf{QLoRA} \cite{dettmers2023qlora}, which freezes the base model parameters $W$ and injects trainable low-rank adapters $\Delta W = BA$. To minimize memory footprint, the base weights $W$ are quantized to 4-bit NormalFloat (NF4) precision.
+\begin{equation}
+    Y = (W_{4bit} + s \cdot BA)X
+\end{equation}
+This reduces the memory requirement of a 7B model from $\approx 14$GB (FP16) to $\approx 4.5$GB (INT4), enabling training on 16GB RAM devices.
+
+\section{Results}
+
+\subsection{Benchmark Performance}
+We evaluated the base DeepSeek-Math-7B model across multiple subsets of the MATH dataset. Table \ref{tab:results} summarizes the key metrics.
+
+\begin{table}[H]
+\centering
+\caption{ReAlign Benchmark Results on MATH Subsets}
+\label{tab:results}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Subset} & \textbf{Count} & \textbf{Accuracy} & \textbf{Avg. Alignment} & \textbf{Std. Dev} \\
+\midrule
+Algebra & \placeholder{1187} & \placeholder{62.3\%} & \placeholder{0.781} & \placeholder{0.146} \\
+Geometry & \placeholder{479} & \placeholder{58.2\%} & \placeholder{0.723} & \placeholder{0.169} \\
+Number Theory & \placeholder{540} & \placeholder{49.2\%} & \placeholder{0.685} & \placeholder{0.192} \\
+\textbf{Total} & \textbf{\placeholder{5000}} & \textbf{\placeholder{59.8\%}} & \textbf{\placeholder{0.746}} & \textbf{\placeholder{0.163}} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Quadrant Analysis of Reasoning Quality}
+Figure \ref{fig:quadrant} presents our Quadrant Analysis, plotting Alignment Score against Correctness.
+
+\begin{figure}[H]
+    \centering
+    \fbox{\placeholder{INSERT FIGURE: quadrant\_analysis.png}}
+    \caption{Quadrant Analysis distinguishing robust reasoning from hallucinations and lucky guesses.}
+    \label{fig:quadrant}
+\end{figure}
+
+This analysis reveals four distinct behaviors:
+\begin{enumerate}
+    \item \textbf{Robust Reasoning}: \placeholder{XX}\% of cases. High alignment and correct answer.
+    \item \textbf{Hallucination}: \placeholder{XX}\% of cases. High alignment but incorrect answer. These represent "near-misses" where the model understood the logic but failed a calculation.
+    \item \textbf{Lucky Guess}: \placeholder{XX}\% of cases. Low alignment but correct answer.
+    \item \textbf{Complete Failure}: \placeholder{XX}\% of cases.
+\end{enumerate}
+
+\subsection{Alignment Visualization}
+To qualitatively validate our metric, we visualize the alignment matrix for a representative problem in Figure \ref{fig:heatmap}.
+
+\begin{figure}[H]
+    \centering
+    \fbox{\placeholder{INSERT FIGURE: heatmap\_example\_best.png}}
+    \caption{Heatmap showing the cosine similarity matrix between student and benchmark steps. The diagonal path indicates strong sequential alignment.}
+    \label{fig:heatmap}
+\end{figure}
+
+\section{Discussion}
+The results highlight the inadequacy of binary correctness metrics. The \placeholder{XX}\% of "Hallucinations" identified by ReAlign represent a significant opportunity: these models are conceptually sound but computationally brittle. A targeted intervention, such as using a calculator tool or specialized arithmetic training, could convert these near-misses into successes.
+
+Our QLoRA experiments confirm that high-performance LLM research is viable on consumer hardware. By reducing the memory barrier, we enable a broader community to contribute to reasoning research.
+
+\section{Conclusion}
+ReAlign provides a systematic, quantitative approach to evaluate LLM reasoning fidelity. By combining semantic embeddings, dynamic programming, and dual-mode grading, we offer a reproducible framework that goes beyond binary correctness. Our open-source toolkit enables researchers to diagnose model failure modes with unprecedented granularity.
+
+\section*{References}
+\bibliographystyle{plain}
+\begin{thebibliography}{99}
+\bibitem{hendrycks2021measuring} Hendrycks, D., et al. (2021). "Measuring Mathematical Problem Solving With the MATH Dataset." \textit{NeurIPS}.
+\bibitem{cobbe2021training} Cobbe, K., et al. (2021). "Training Verifiers to Solve Math Word Problems." \textit{arXiv preprint}.
+\bibitem{hu2021lora} Hu, E. J., et al. (2021). "LoRA: Low-Rank Adaptation of Large Language Models." \textit{ICLR}.
+\bibitem{dettmers2023qlora} Dettmers, T., et al. (2023). "QLoRA: Efficient Finetuning of Quantized LLMs." \textit{NeurIPS}.
+\bibitem{needleman1970general} Needleman, S. B., \& Wunsch, C. D. (1970). "A general method applicable to the search for similarities in the amino acid sequence of two proteins." \textit{Journal of Molecular Biology}.
+\end{thebibliography}
+
+\section*{Author Contributions}
+\textbf{Shaurya Srivastav}: Conceptualization, Algorithm Design, Implementation, and Writing.
+
+\end{document}

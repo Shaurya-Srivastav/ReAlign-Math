@@ -1,0 +1,14 @@
+# User requested ignores
+LORA/mlx_model/
+LORA/dataset_cache.pkl
+
+# Large model artifacts (LoRA/QLoRA adapters)
+adapters/
+qlora_adapters/
+*.safetensors
+
+# Python/System
+__pycache__/
+*.pyc
+.DS_Store
+.env
